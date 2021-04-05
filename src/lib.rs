@@ -1,7 +1,7 @@
 //!
 //! Dynamic, plugin-based [Symbol](https://en.wikipedia.org/wiki/Symbol_(programming)) abstraction.
 //!
-//! A [Symbol] can be used as an _identifier_ in place of a primitive [String].
+//! A [Symbol] can be used as an _identifier_ in place of the more primitive workhorse [String].
 //! There could be multiple reasons to do so:
 //!
 //! 1. Mixing of different domains in the same runtime code
@@ -10,15 +10,23 @@
 //! 4. Mix of static and dynamic allocation
 //! 5. Associating metadata to the symbols themselves
 //!
-//! There are probably more reasons _not_ to use symbols than to use them!
+//! The main use case for symbols is as map keys for in-memory key/value stores.
 //!
-//! # Example usages:
-//! * Namespaced XML/HTML attributes (in HTML, some are static and some are dynamic. e.g. `data-` attributes)
-//! * Large maps that can store "anything"
-//! * Some way to abstract away string interners? (untested)
+//! Note that there are probably more reasons _not_ to use symbols than to use them! In most cases, something like
+//! `enum` or [String] will do just fine. But sometimes applications process a lot of semi-schematic external input,
+//! and you just want Rust to work like any old dynamic programming language again.
 //!
-//! A [Symbol] is just one type, that can represent all possible symbol values. It implements all traits to make it
-//! usable as a key for maps.
+//! # Example use cases
+//! * Namespaced XML/HTML attributes (in HTML, some are static and some are dynamic. i.e. `data-` attributes)
+//! * Key/value stores for "anything"
+//! * Some way to abstract away string interners? (this is untested)
+//!
+//! A [Symbol] is just one plain, non-generic type, that can represent all possible symbol values. It implements all traits to make it
+//! usable as a key in maps.
+//!
+//! # What this crate does not do
+//! * Serialization and deserialization of symbols. [Symbol] should not implement `serde` traits, ser/de should instead be handled by each namespace.
+//! * Provide any namespaces.
 //!
 //! # Static symbols
 //! Static symbols originate from a namespace where all possible values are statically known at compile time.
@@ -29,13 +37,20 @@
 //! ```
 //! use dyn_symbol::*;
 //!
-//! struct StaticNS {
+//! struct MyStaticNS {
 //!     symbols: &'static [(&'static str, &'static str)],
 //! }
 //!
-//! impl dyn_symbol::namespace::Static for StaticNS {
+//! const MY_STATIC_NS: MyStaticNS = MyStaticNS {
+//!     symbols: &[
+//!         ("foo", "the first symbol!"),
+//!         ("bar", "the second symbol!")
+//!     ]
+//! };
+//!
+//! impl dyn_symbol::namespace::Static for MyStaticNS {
 //!     fn namespace_name(&self) -> &str {
-//!         "static"
+//!         "my"
 //!     }
 //!
 //!     fn symbol_name(&self, id: u32) -> &str {
@@ -43,39 +58,32 @@
 //!     }
 //! }
 //!
-//! const STATIC_NS: StaticNS = StaticNS {
-//!     symbols: &[
-//!         ("foo", "the first symbol!"),
-//!         ("bar", "the second symbol!")
-//!     ]
-//! };
-//! const STATIC_NS_REF: StaticRef = StaticRef(&STATIC_NS);
+//! // Define (and export) some symbol constants
+//! pub const FOO: Symbol = Symbol::Static(&MY_STATIC_NS, 0);
+//! pub const BAR: Symbol = Symbol::Static(&MY_STATIC_NS, 1);
 //!
-//! const fn foo() -> Symbol { Symbol::new_static(&STATIC_NS_REF, 0) }
-//! const fn bar() -> Symbol { Symbol::new_static(&STATIC_NS_REF, 1) }
-//!
-//! assert_eq!(foo(), foo());
-//! assert_ne!(foo(), bar());
-//! assert_eq!(format!("{:?}", foo()), "static::foo");
+//! assert_eq!(FOO, FOO);
+//! assert_eq!(FOO.clone(), FOO.clone());
+//! assert_ne!(FOO, BAR);
+//! assert_eq!(format!("{:?}", FOO), "my::foo");
 //!
 //! // We can find the originating namespace later:
-//! assert!(foo().namespace().downcast_ref::<StaticNS>().is_some());
+//! assert!(FOO.downcast_static::<MyStaticNS>().is_some());
 //!
 //! // To implement special metadata-extraction (or similar functionality) for a namespace:
 //! fn get_symbol_description(symbol: &Symbol) -> Result<&'static str, &'static str> {
-//!     if let Some(namespace) = symbol.namespace().downcast_ref::<StaticNS>() {
-//!         let id = symbol.static_id().unwrap();
+//!     if let Some((namespace, id)) = symbol.downcast_static::<MyStaticNS>() {
 //!         Ok(namespace.symbols[id as usize].1)
 //!     } else {
 //!         Err("not from this namespace :(")
 //!     }
 //! }
 //!
-//! assert_eq!(get_symbol_description(&bar()).unwrap(), "the second symbol!");
+//! assert_eq!(get_symbol_description(&BAR).unwrap(), "the second symbol!");
 //! ```
 //!
-//! For static symbols, the implementations of [Eq], [Ord] and [std::hash::Hash] et. al use only the namespace's [std::any::Any::type_id]
-//! and the number [StaticSymbol::id].
+//! For static symbols, the implementations of [Eq]/[Ord]/[Hash](std::hash::Hash) et. al use only the namespace's [type_id](std::any::Any::type_id)
+//! plus the symbol's numerical `id`.
 //!
 //! Typically, the boilerplate code for a static namespace will be generated by macros or `build.rs`.
 //!
@@ -119,30 +127,34 @@
 //!     }
 //! }
 //!
-//! let foo0 = Symbol::new_dynamic(Box::new(DynamicNS("foo".into())));
-//! let foo1 = Symbol::new_dynamic(Box::new(DynamicNS("foo".into())));
-//! let bar = Symbol::new_dynamic(Box::new(DynamicNS("bar".into())));
+//! let foo0 = Symbol::Dynamic(Box::new(DynamicNS("foo".into())));
+//! let foo1 = Symbol::Dynamic(Box::new(DynamicNS("foo".into())));
+//! let bar = Symbol::Dynamic(Box::new(DynamicNS("bar".into())));
 //!
 //! assert_eq!(foo0, foo1);
+//! assert_eq!(foo0.clone(), foo1.clone());
 //! assert_ne!(foo0, bar);
 //! ```
 //!
 //! It is entirely up to the Dynamic implementation to consider what kind of symbols are considered equal.
+//! The `Eq`/`Hash` symmetry need to hold, though.
 //!
 //! Dynamic symbols are supported as a companion to static symbols. If your application works mainly with dynamic symbols,
-//! you should consider using a different keying mechanism, because of the overhead it incurs.
+//! you should consider using a different keying mechanism, because of the inherent overhead/indirection/boxing of dynamic symbols.
 //!
 //! # Type system
-//! This crate makes use of [std::any::Any], and consideres namespace types with the same `type_id` to be the same namespace.
-//! This could make code reuse a bit cumbersome. If a crate exports multiple namespaces, this can be solved by using const generics:
+//! This crate makes use of [Any](std::any::Any), and consideres namespaces sharing the same [TypeId](std::any::TypeId) to be the _same namespace_.
+//! This could make code reuse a bit cumbersome. If one crate exports multiple namespaces, this can be solved by using const generics:
 //!
 //! ```
-//! struct MyNamespace<const N: u8>;
+//! struct ReusableNamespace<const N: u8>;
 //!
 //! // impl<const N: u8> namespace::Static for MyNamespace<N> { ... }
 //!
-//! const NS_1: MyNamespace<1> = MyNamespace;
-//! const NS_2: MyNamespace<2> = MyNamespace;
+//! const NS_1: ReusableNamespace<1> = ReusableNamespace;
+//! const NS_2: ReusableNamespace<2> = ReusableNamespace;
+//!
+//! // assert_ne!(NS_1.type_id(), NS_2.type_id());
 //! ```
 //!
 //! This will cause the two namespaces to have differing `type_id`s.
@@ -155,42 +167,50 @@ use std::cmp::Ordering;
 /// A symbol, with support for mixed static/dynamic allocation.
 ///
 pub enum Symbol {
-    Static(&'static StaticRef, u32),
-    Dyn(Box<dyn namespace::Dynamic>),
+    /// Construct a Symbol originating from a static namespace.
+    /// The first parameter is a trait object pointing back to the namespace,
+    /// the second parameter is the symbol `id` within that namespace.
+    Static(&'static dyn namespace::Static, u32),
+
+    /// Construct a Symbol with dynamic origins. Dynamic namespaces are unbounded in size,
+    /// so a memory allocation is needed. This encoding allows dynamic namespaces to support
+    /// the same semantics that static namespaces do. Instead of just using a [String], we
+    /// can also encode what kind of string it is.
+    Dynamic(Box<dyn namespace::Dynamic>),
 }
 
 impl Symbol {
     ///
-    /// Construct a new static symbol.
+    /// Get access to the associated namespace's `Any` representation.
+    /// its `type_id` may be used as a reflection tool to get to know about the Symbol's origin.
     ///
-    pub const fn new_static(symbol: &'static StaticRef, id: u32) -> Self {
-        Self::Static(symbol, id)
-    }
-
-    ///
-    /// Construct a new dynamic symbol.
-    ///
-    pub fn new_dynamic(symbol: Box<dyn namespace::Dynamic>) -> Self {
-        Self::Dyn(symbol)
-    }
-
-    ///
-    /// Get a [std::any::Any] reference to the symbol's originating namespace.
-    ///
-    pub fn namespace(&self) -> &dyn std::any::Any {
+    pub fn as_any(&self) -> &dyn std::any::Any {
         match self {
-            Self::Static(ns, _) => ns.0.as_any(),
-            Self::Dyn(this) => this.as_any(),
+            Self::Static(ns, _) => ns.as_any(),
+            Self::Dynamic(instance) => instance.as_any(),
         }
     }
 
     ///
-    /// Get the symbol's static id in case it's static, or [None] if it's not static.
+    /// Try to downcast this Symbol's originating _static namespace_ to a concrete `&T`,
+    /// and if successful, return that concrete namespace along with the symbol's static id.
     ///
-    pub fn static_id(&self) -> Option<u32> {
+    pub fn downcast_static<T: 'static>(&self) -> Option<(&T, u32)> {
         match self {
-            Self::Static(_, id) => Some(*id),
-            Self::Dyn(_) => None,
+            Self::Static(ns, id) => ns.as_any().downcast_ref::<T>().map(|t| (t, *id)),
+            Self::Dynamic(_) => None,
+        }
+    }
+
+    ///
+    /// Try to downcast this Symbol's _dynamic namespace_ as a `&T`.
+    ///
+    /// Always fails for static namespaces.
+    ///
+    pub fn downcast_dyn<T: 'static>(&self) -> Option<&T> {
+        match self {
+            Self::Static(_, _) => None,
+            Self::Dynamic(instance) => instance.as_any().downcast_ref::<T>(),
         }
     }
 }
@@ -198,8 +218,8 @@ impl Symbol {
 impl Clone for Symbol {
     fn clone(&self) -> Self {
         match self {
-            Self::Static(static_symbol, id) => Self::Static(static_symbol, *id),
-            Self::Dyn(instance) => Self::Dyn(instance.dyn_clone()),
+            Self::Static(static_symbol, id) => Self::Static(*static_symbol, *id),
+            Self::Dynamic(instance) => Self::Dynamic(instance.dyn_clone()),
         }
     }
 }
@@ -208,9 +228,9 @@ impl std::fmt::Debug for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::Static(ns, id) => {
-                write!(f, "{}::{}", ns.0.namespace_name(), ns.0.symbol_name(*id))
+                write!(f, "{}::{}", ns.namespace_name(), ns.symbol_name(*id))
             }
-            Self::Dyn(instance) => {
+            Self::Dynamic(instance) => {
                 write!(
                     f,
                     "{}::{}",
@@ -226,9 +246,9 @@ impl PartialEq for Symbol {
     fn eq(&self, rhs: &Symbol) -> bool {
         match (self, rhs) {
             (Self::Static(this_ns, this_id), Self::Static(rhs_ns, rhs_id)) => {
-                *this_id == *rhs_id && this_ns.0.type_id() == rhs_ns.0.type_id()
+                *this_id == *rhs_id && this_ns.type_id() == rhs_ns.type_id()
             }
-            (Self::Dyn(this), Self::Dyn(rhs)) => {
+            (Self::Dynamic(this), Self::Dynamic(rhs)) => {
                 this.type_id() == rhs.type_id() && this.dyn_eq(rhs.as_ref())
             }
             _ => false,
@@ -242,8 +262,8 @@ impl Ord for Symbol {
     fn cmp(&self, rhs: &Symbol) -> Ordering {
         match (self, rhs) {
             (Self::Static(this_ns, this_id), Self::Static(rhs_ns, rhs_id)) => {
-                let this_type_id = this_ns.0.type_id();
-                let rhs_type_id = rhs_ns.0.type_id();
+                let this_type_id = this_ns.type_id();
+                let rhs_type_id = rhs_ns.type_id();
 
                 if this_type_id == rhs_type_id {
                     this_id.cmp(&rhs_id)
@@ -251,7 +271,7 @@ impl Ord for Symbol {
                     this_type_id.cmp(&rhs_type_id)
                 }
             }
-            (Self::Dyn(this), Self::Dyn(rhs)) => {
+            (Self::Dynamic(this), Self::Dynamic(rhs)) => {
                 let this_type_id = this.type_id();
                 let rhs_type_id = rhs.type_id();
 
@@ -261,8 +281,8 @@ impl Ord for Symbol {
                     this_type_id.cmp(&rhs_type_id)
                 }
             }
-            (Self::Static(_, _), Self::Dyn(_)) => Ordering::Less,
-            (Self::Dyn(_), Self::Static(_, _)) => Ordering::Greater,
+            (Self::Static(_, _), Self::Dynamic(_)) => Ordering::Less,
+            (Self::Dynamic(_), Self::Static(_, _)) => Ordering::Greater,
         }
     }
 }
@@ -277,10 +297,10 @@ impl std::hash::Hash for Symbol {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
             Self::Static(ns, id) => {
-                ns.0.type_id().hash(state);
+                ns.type_id().hash(state);
                 state.write_u32(*id)
             }
-            Self::Dyn(dynamic_sym) => {
+            Self::Dynamic(dynamic_sym) => {
                 dynamic_sym.type_id().hash(state);
                 dynamic_sym.dyn_hash(state)
             }
@@ -288,26 +308,60 @@ impl std::hash::Hash for Symbol {
     }
 }
 
-///
-/// Indirection of a static namespace, to reduce the size of [Symbol].
-///
-pub struct StaticRef(pub &'static dyn namespace::Static);
-
 pub mod namespace {
+    //!
+    //! Namespace traits that must be implemented by symbol providers.
+    //!
+
     use downcast_rs::*;
 
+    ///
+    /// A static namespace. Symbols in a static namespace are identified with an `id` encoded as a `u32`.
+    ///
     pub trait Static: Send + Sync + Downcast {
+        ///
+        /// The namespace's name, used for [Debug][std::fmt::Debug].
+        ///
         fn namespace_name(&self) -> &str;
+
+        ///
+        /// A symbol's name, used for [Debug][std::fmt::Debug].
+        ///
         fn symbol_name(&self, id: u32) -> &str;
     }
 
+    ///
+    /// A dynamic namespace. A dynamic symbol instance is tied to `Self`.
+    ///
     pub trait Dynamic: Send + Sync + Downcast {
+        ///
+        /// The namespace's name, used for [Debug][std::fmt::Debug].
+        ///
         fn namespace_name(&self) -> &str;
+
+        ///
+        /// The symbol name, used for [Debug][std::fmt::Debug].
+        ///
         fn symbol_name(&self) -> &str;
 
+        ///
+        /// Clone this dynamic symbol. Must return a new symbol instance that is `eq` to `&self`.
+        ///
         fn dyn_clone(&self) -> Box<dyn Dynamic>;
+
+        ///
+        /// Dynamic [eq](std::cmp::PartialEq::eq). `rhs` can be unconditionally downcasted to `Self`.
+        ///
         fn dyn_eq(&self, rhs: &dyn Dynamic) -> bool;
+
+        ///
+        /// Dynamic [cmp](std::cmp::Ord::cmp). `rhs` can be unconditionally downcasted to `Self`.
+        ///
         fn dyn_cmp(&self, rhs: &dyn Dynamic) -> std::cmp::Ordering;
+
+        ///
+        /// Dynamic [hash](std::hash::Hash::hash). `rhs` can be unconditionally downcasted to `Self`.
+        ///
         fn dyn_hash(&self, state: &mut dyn std::hash::Hasher);
     }
 
@@ -322,7 +376,7 @@ mod tests {
     mod _static {
         use super::*;
 
-        struct ClassN<const N: u8> {
+        pub struct ClassN<const N: u8> {
             class_name: &'static str,
             names: &'static [&'static str],
         }
@@ -337,17 +391,14 @@ mod tests {
             }
         }
 
-        const STATIC_NS_CLASS_A: ClassN<1> = ClassN {
+        pub const STATIC_NS_CLASS_A: ClassN<1> = ClassN {
             class_name: "A",
             names: &["0", "1"],
         };
-        const STATIC_NS_CLASS_B: ClassN<2> = ClassN {
+        pub const STATIC_NS_CLASS_B: ClassN<2> = ClassN {
             class_name: "B",
             names: &["0"],
         };
-
-        pub const STATIC_REF_A: StaticRef = StaticRef(&STATIC_NS_CLASS_A);
-        pub const STATIC_REF_B: StaticRef = StaticRef(&STATIC_NS_CLASS_B);
     }
 
     mod dynamic {
@@ -383,17 +434,17 @@ mod tests {
         }
 
         pub fn sym0(str: &str) -> Symbol {
-            Symbol::new_dynamic(Box::new(TestDynamic::<0>(str.into(), "dyn0")))
+            Symbol::Dynamic(Box::new(TestDynamic::<0>(str.into(), "dyn0")))
         }
 
         pub fn sym1(str: &str) -> Symbol {
-            Symbol::new_dynamic(Box::new(TestDynamic::<1>(str.into(), "dyn1")))
+            Symbol::Dynamic(Box::new(TestDynamic::<1>(str.into(), "dyn1")))
         }
     }
 
-    const STATIC_A_0: Symbol = Symbol::new_static(&_static::STATIC_REF_A, 0);
-    const STATIC_A_1: Symbol = Symbol::new_static(&_static::STATIC_REF_A, 1);
-    const STATIC_B_0: Symbol = Symbol::new_static(&_static::STATIC_REF_B, 0);
+    const STATIC_A_0: Symbol = Symbol::Static(&_static::STATIC_NS_CLASS_A, 0);
+    const STATIC_A_1: Symbol = Symbol::Static(&_static::STATIC_NS_CLASS_A, 1);
+    const STATIC_B_0: Symbol = Symbol::Static(&_static::STATIC_NS_CLASS_B, 0);
 
     struct TestState {
         random_state: std::collections::hash_map::RandomState,
@@ -435,10 +486,21 @@ mod tests {
 
     #[test]
     fn test_symbol_size_of() {
-        assert_eq!(
-            std::mem::size_of::<Symbol>(),
-            3 * std::mem::size_of::<usize>()
-        )
+        let u_size = std::mem::size_of::<usize>();
+
+        // This size_of Symbol is computed like this:
+        // It's at least two words, because of `dyn`.
+        // it's more than two words because it needs to encode the A/B enum value.
+        // on 64-bit arch it should be 3 words, because it contains an `u32` too,
+        // and that should be encoded within the same machine word as the enum discriminant..
+        // I think...
+        let expected_word_size = match u_size {
+            8 => 3 * u_size,
+            // 4 => 4, Perhaps?
+            _ => panic!("untested word size"),
+        };
+
+        assert_eq!(std::mem::size_of::<Symbol>(), expected_word_size);
     }
 
     #[test]
