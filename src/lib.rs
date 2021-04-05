@@ -180,6 +180,13 @@ pub enum Symbol {
 }
 
 impl Symbol {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Static(ns, id) => ns.symbol_name(*id),
+            Self::Dynamic(instance) => instance.symbol_name(),
+        }
+    }
+
     ///
     /// Get access to the associated namespace's `Any` representation.
     /// its `type_id` may be used as a reflection tool to get to know about the Symbol's origin.
